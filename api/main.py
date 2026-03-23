@@ -20,6 +20,7 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 import asyncpg
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -40,7 +41,13 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 RETRAIN_DIR.mkdir(parents=True, exist_ok=True)
 
 #  DB ─
+# Load local environment variables when running uvicorn directly.
+load_dotenv(BASE_DIR / ".env")
 DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL is not set. Add it to .env or export it in your shell."
+    )
 
 #  Global state 
 classifier: Optional[SatelliteClassifier] = None
