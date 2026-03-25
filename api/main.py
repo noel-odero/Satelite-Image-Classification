@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 import asyncpg
+import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,7 +32,7 @@ from src.prediction import SatelliteClassifier
 from src.preprocessing import validate_image
 from src.model import retrain
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
+# Paths 
 BASE_DIR      = Path(__file__).parent.parent
 MODEL_PATH    = BASE_DIR / "models" / "satellite_classifier.h5"
 RETRAIN_MODEL = BASE_DIR / "models" / "best_model.keras"
@@ -44,27 +45,107 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 RETRAIN_DIR.mkdir(parents=True, exist_ok=True)
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
-# ── DB ────────────────────────────────────────────────────────────────────────
+# DB 
 # Load .env for local development runs (uvicorn on host). In containers/platforms,
 # runtime environment variables still take precedence.
 load_dotenv(BASE_DIR / ".env")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 DB_CONNECT_RETRIES = int(os.environ.get("DB_CONNECT_RETRIES", "30"))
 DB_CONNECT_DELAY_SECONDS = float(os.environ.get("DB_CONNECT_DELAY_SECONDS", "2"))
+HF_MODEL_URL = os.environ.get("HF_MODEL_URL", "").strip()
+HF_TOKEN = os.environ.get("HF_TOKEN", "").strip()
+HF_TIMEOUT_SECONDS = float(os.environ.get("HF_TIMEOUT_SECONDS", "60"))
+USE_HF_INFERENCE = os.environ.get("USE_HF_INFERENCE", "false").lower() == "true" or bool(HF_MODEL_URL)
 
-# ── Global state ──────────────────────────────────────────────────────────────
+# Global state 
 classifier: Optional[SatelliteClassifier] = None
 db_pool: Optional[asyncpg.Pool] = None
 retrain_status = {"running": False, "last_result": None}
 
 
-# ── Startup / Shutdown ────────────────────────────────────────────────────────
+def _normalize_label(label: str) -> str:
+    return str(label).strip().lower().replace(" ", "_")
+
+
+def _normalize_hf_output(payload) -> dict:
+    rows = []
+    if isinstance(payload, list):
+        rows = payload[0] if payload and isinstance(payload[0], list) else payload
+    elif isinstance(payload, dict) and isinstance(payload.get("labels"), list) and isinstance(payload.get("scores"), list):
+        rows = [
+            {"label": label, "score": payload["scores"][idx]}
+            for idx, label in enumerate(payload["labels"])
+        ]
+
+    if not rows:
+        raise ValueError("Unexpected Hugging Face response format")
+
+    normalized = sorted(
+        [
+            {
+                "label": _normalize_label(item.get("label", "unknown")),
+                "score": float(item.get("score", 0.0)),
+            }
+            for item in rows
+        ],
+        key=lambda x: x["score"],
+        reverse=True,
+    )
+
+    return {
+        "predicted_class": normalized[0]["label"],
+        "confidence": normalized[0]["score"],
+        "all_probabilities": {
+            item["label"]: item["score"]
+            for item in normalized
+        },
+    }
+
+
+async def _predict_with_hf(file_bytes: bytes) -> dict:
+    if not HF_MODEL_URL:
+        raise HTTPException(status_code=500, detail="HF_MODEL_URL is not configured")
+
+    headers = {"Content-Type": "application/octet-stream"}
+    if HF_TOKEN:
+        headers["Authorization"] = f"Bearer {HF_TOKEN}"
+
+    def _post_request():
+        return requests.post(
+            HF_MODEL_URL,
+            headers=headers,
+            data=file_bytes,
+            timeout=HF_TIMEOUT_SECONDS,
+        )
+
+    response = await asyncio.to_thread(_post_request)
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {"raw": response.text}
+
+    if response.status_code >= 400:
+        detail = payload.get("error") if isinstance(payload, dict) else str(payload)
+        raise HTTPException(status_code=502, detail=f"Hugging Face error: {detail}")
+
+    try:
+        return _normalize_hf_output(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+# Startup / Shutdown 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global classifier, db_pool
 
-    # Load model
-    classifier = SatelliteClassifier(str(MODEL_PATH), str(CLASS_NAMES))
+    # Load local model only when local inference is enabled.
+    if USE_HF_INFERENCE:
+        print(f"Using Hugging Face inference endpoint: {HF_MODEL_URL}")
+        classifier = None
+    else:
+        classifier = SatelliteClassifier(str(MODEL_PATH), str(CLASS_NAMES))
 
     # Connect to PostgreSQL with retries for containerized startup races.
     if not DATABASE_URL:
@@ -122,7 +203,7 @@ async def lifespan(app: FastAPI):
         await db_pool.close()
 
 
-# ── App ───────────────────────────────────────────────────────────────────────
+# App 
 app = FastAPI(
     title="Satellite Image Classifier API",
     description="ML Pipeline API — predict terrain type from satellite images",
@@ -141,7 +222,7 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
-# ── API Endpoints ─────────────────────────────────────────────────────────────
+# API Endpoints 
 
 @app.get("/health")
 async def health():
@@ -149,6 +230,7 @@ async def health():
     return {
         "status": "online",
         "model": "satellite_classifier",
+        "inference_provider": "huggingface" if USE_HF_INFERENCE else "local",
         "timestamp": datetime.utcnow().isoformat(),
         "retrain_running": retrain_status["running"],
     }
@@ -165,7 +247,12 @@ async def predict(file: UploadFile = File(...)):
     if not validate_image(file_bytes, file.filename):
         raise HTTPException(status_code=400, detail="Invalid image file.")
 
-    result = classifier.predict(file_bytes)
+    if USE_HF_INFERENCE:
+        result = await _predict_with_hf(file_bytes)
+    else:
+        if classifier is None:
+            raise HTTPException(status_code=503, detail="Local model not initialized")
+        result = classifier.predict(file_bytes)
 
     async with db_pool.acquire() as conn:
         await conn.execute(
@@ -229,14 +316,15 @@ async def _run_retrain():
     try:
         result = retrain(
             new_data_dir=str(RETRAIN_DIR),
-            model_path=str(RETRAIN_MODEL),
+            model_path=str(MODEL_PATH),
             class_names_path=str(CLASS_NAMES),
             epochs=5,
         )
         retrain_status["last_result"] = result
 
-        # Reload classifier with updated model
-        classifier = SatelliteClassifier(str(MODEL_PATH), str(CLASS_NAMES))
+        # Reload classifier with updated model only for local inference mode.
+        if not USE_HF_INFERENCE:
+            classifier = SatelliteClassifier(str(MODEL_PATH), str(CLASS_NAMES))
 
         async with db_pool.acquire() as conn:
             await conn.execute(
@@ -315,7 +403,7 @@ async def get_visualizations():
     return {"visualizations": available}
 
 
-# ── Frontend catch-all — must be LAST ─────────────────────────────────────────
+# Frontend catch-all — must be LAST ─────────────────────────────────────────
 @app.get("/{full_path:path}", include_in_schema=False)
 async def serve_frontend(full_path: str):
     """Serve the React app for all non-API routes."""
