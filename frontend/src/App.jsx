@@ -6,7 +6,10 @@ import Upload from './components/Upload.jsx'
 import RecentPredictions from './components/RecentPredictions.jsx'
 import RetrainPanel from './components/RetrainPanel.jsx'
 
-const TABS = ['Monitor', 'Predict', 'Visualize', 'Upload', 'Retrain', 'History']
+const FRONTEND_ONLY = import.meta.env.VITE_FRONTEND_ONLY === 'true'
+const TABS = FRONTEND_ONLY
+  ? ['Predict']
+  : ['Monitor', 'Predict', 'Visualize', 'Upload', 'Retrain', 'History']
 
 const styles = {
   shell: {
@@ -60,7 +63,7 @@ const styles = {
 }
 
 export default function App() {
-  const [tab, setTab] = useState('Monitor')
+  const [tab, setTab] = useState(FRONTEND_ONLY ? 'Predict' : 'Monitor')
 
   return (
     <div style={styles.shell}>
