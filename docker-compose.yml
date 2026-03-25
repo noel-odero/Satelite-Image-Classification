@@ -2,12 +2,13 @@ services:
   api:
     build: .
     ports:
-      - "5433:5432"
+      - "8000:8000"
     environment:
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/satellite_db
     depends_on:
       db:
         condition: service_healthy
+    restart: unless-stopped
     volumes:
       - ./models:/app/models
       - ./data:/app/data
@@ -28,6 +29,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
 volumes:
   pgdata:

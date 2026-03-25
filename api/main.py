@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 import asyncpg
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
@@ -44,7 +45,12 @@ RETRAIN_DIR.mkdir(parents=True, exist_ok=True)
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── DB ────────────────────────────────────────────────────────────────────────
+# Load .env for local development runs (uvicorn on host). In containers/platforms,
+# runtime environment variables still take precedence.
+load_dotenv(BASE_DIR / ".env")
 DATABASE_URL = os.environ.get("DATABASE_URL")
+DB_CONNECT_RETRIES = int(os.environ.get("DB_CONNECT_RETRIES", "30"))
+DB_CONNECT_DELAY_SECONDS = float(os.environ.get("DB_CONNECT_DELAY_SECONDS", "2"))
 
 # ── Global state ──────────────────────────────────────────────────────────────
 classifier: Optional[SatelliteClassifier] = None
@@ -60,9 +66,29 @@ async def lifespan(app: FastAPI):
     # Load model
     classifier = SatelliteClassifier(str(MODEL_PATH), str(CLASS_NAMES))
 
-    # Connect to PostgreSQL
-    db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+    # Connect to PostgreSQL with retries for containerized startup races.
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL is not set.")
+
+    last_error = None
+    for attempt in range(1, DB_CONNECT_RETRIES + 1):
+        try:
+            db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+            break
+        except Exception as exc:
+            last_error = exc
+            print(
+                f"DB connection attempt {attempt}/{DB_CONNECT_RETRIES} failed: {exc}"
+            )
+            if attempt == DB_CONNECT_RETRIES:
+                raise
+            await asyncio.sleep(DB_CONNECT_DELAY_SECONDS)
+
+    if db_pool is None:
+        raise RuntimeError(f"Failed to create database pool: {last_error}")
+
     async with db_pool.acquire() as conn:
+        await conn.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto;")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS uploaded_images (
                 id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -92,7 +118,8 @@ async def lifespan(app: FastAPI):
     print("Database tables ready.")
     yield
 
-    await db_pool.close()
+    if db_pool is not None:
+        await db_pool.close()
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
