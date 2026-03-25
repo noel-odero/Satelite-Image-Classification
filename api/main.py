@@ -12,6 +12,7 @@ FastAPI application — exposes all endpoints needed by the UI:
 import os
 import io
 import uuid
+import json
 import shutil
 import asyncio
 from pathlib import Path
@@ -20,42 +21,38 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 import asyncpg
-from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from src.prediction import SatelliteClassifier
 from src.preprocessing import validate_image
 from src.model import retrain
 
-#  Paths 
-BASE_DIR        = Path(__file__).parent.parent
-MODEL_PATH      = BASE_DIR / "models" / "satellite_classifier.h5"
-RETRAIN_MODEL   = BASE_DIR / "models" / "best_model.keras"
-CLASS_NAMES     = BASE_DIR / "models" / "class_names.json"
-UPLOAD_DIR      = BASE_DIR / "data" / "uploads"
-RETRAIN_DIR     = BASE_DIR / "data" / "retrain"
+# ── Paths ─────────────────────────────────────────────────────────────────────
+BASE_DIR      = Path(__file__).parent.parent
+MODEL_PATH    = BASE_DIR / "models" / "satellite_classifier.h5"
+RETRAIN_MODEL = BASE_DIR / "models" / "best_model.keras"
+CLASS_NAMES   = BASE_DIR / "models" / "class_names.json"
+UPLOAD_DIR    = BASE_DIR / "data" / "uploads"
+RETRAIN_DIR   = BASE_DIR / "data" / "retrain"
+STATIC_DIR    = BASE_DIR / "static"
+
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 RETRAIN_DIR.mkdir(parents=True, exist_ok=True)
+STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
-#  DB ─
-# Load local environment variables when running uvicorn directly.
-load_dotenv(BASE_DIR / ".env")
+# ── DB ────────────────────────────────────────────────────────────────────────
 DATABASE_URL = os.environ.get("DATABASE_URL")
-if not DATABASE_URL:
-    raise RuntimeError(
-        "DATABASE_URL is not set. Add it to .env or export it in your shell."
-    )
 
-#  Global state 
+# ── Global state ──────────────────────────────────────────────────────────────
 classifier: Optional[SatelliteClassifier] = None
 db_pool: Optional[asyncpg.Pool] = None
 retrain_status = {"running": False, "last_result": None}
 
 
-#  Startup / Shutdown 
+# ── Startup / Shutdown ────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global classifier, db_pool
@@ -98,7 +95,7 @@ async def lifespan(app: FastAPI):
     await db_pool.close()
 
 
-#  App 
+# ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="Satellite Image Classifier API",
     description="ML Pipeline API — predict terrain type from satellite images",
@@ -113,10 +110,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+# Serve static assets (visualizations, etc.)
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
-#  Endpoints 
+# ── API Endpoints ─────────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
@@ -142,9 +140,7 @@ async def predict(file: UploadFile = File(...)):
 
     result = classifier.predict(file_bytes)
 
-    # Log to DB
     async with db_pool.acquire() as conn:
-        import json
         await conn.execute(
             """INSERT INTO predictions (filename, predicted_class, confidence, all_probs)
                VALUES ($1, $2, $3, $4)""",
@@ -154,10 +150,7 @@ async def predict(file: UploadFile = File(...)):
             json.dumps(result["all_probabilities"]),
         )
 
-    return JSONResponse(content={
-        "filename": file.filename,
-        **result,
-    })
+    return JSONResponse(content={"filename": file.filename, **result})
 
 
 @app.post("/upload")
@@ -168,7 +161,6 @@ async def upload_images(
     """
     Bulk upload images for a given class label.
     Images are saved to disk and recorded in the database.
-    They will be used when retraining is triggered.
     """
     if class_label.strip() == "":
         raise HTTPException(status_code=400, detail="class_label is required.")
@@ -205,7 +197,7 @@ async def upload_images(
 
 async def _run_retrain():
     """Background task — runs retraining without blocking the API."""
-    global retrain_status
+    global retrain_status, classifier
     retrain_status["running"] = True
     try:
         result = retrain(
@@ -217,12 +209,9 @@ async def _run_retrain():
         retrain_status["last_result"] = result
 
         # Reload classifier with updated model
-        global classifier
         classifier = SatelliteClassifier(str(MODEL_PATH), str(CLASS_NAMES))
 
-        # Log to DB
         async with db_pool.acquire() as conn:
-            import json
             await conn.execute(
                 "INSERT INTO retrain_logs (result) VALUES ($1)",
                 json.dumps(result),
@@ -242,7 +231,6 @@ async def trigger_retrain(background_tasks: BackgroundTasks):
     if retrain_status["running"]:
         raise HTTPException(status_code=409, detail="Retraining already in progress.")
 
-    # Check there is data to retrain on
     class_dirs = [d for d in RETRAIN_DIR.iterdir() if d.is_dir()]
     if not class_dirs:
         raise HTTPException(status_code=400, detail="No uploaded data found for retraining.")
@@ -259,9 +247,7 @@ async def get_retrain_status():
 
 @app.get("/stats")
 async def get_stats():
-    """
-    Returns dataset and prediction statistics for UI visualizations.
-    """
+    """Returns dataset and prediction statistics for UI visualizations."""
     async with db_pool.acquire() as conn:
         upload_counts = await conn.fetch(
             "SELECT class_label, COUNT(*) as count FROM uploaded_images GROUP BY class_label"
@@ -290,13 +276,26 @@ async def get_stats():
 
 @app.get("/visualizations")
 async def get_visualizations():
-    """Returns URLs of precomputed visualization images (from notebook)."""
-    static_dir = BASE_DIR / "static" / "visualizations"
+    """Returns URLs of precomputed visualization images."""
+    vis_dir = STATIC_DIR / "visualizations"
     available = []
-    if static_dir.exists():
+    if vis_dir.exists():
         available = [
             f"/static/visualizations/{f.name}"
-            for f in static_dir.iterdir()
+            for f in vis_dir.iterdir()
             if f.suffix == ".png"
         ]
     return {"visualizations": available}
+
+
+# ── Frontend catch-all — must be LAST ─────────────────────────────────────────
+@app.get("/{full_path:path}", include_in_schema=False)
+async def serve_frontend(full_path: str):
+    """Serve the React app for all non-API routes."""
+    index = STATIC_DIR / "index.html"
+    if index.exists():
+        return FileResponse(str(index))
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Frontend not built yet. Run: cd frontend && npm run build"}
+    )
