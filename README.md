@@ -6,9 +6,9 @@ End-to-end machine learning system for classifying satellite images into 4 terra
 
 - YouTube Demo: `ADD_YOUTUBE_DEMO_LINK_HERE`
 - Live Railway URL: `ADD_RAILWAY_URL_HERE`
-- Live Frontend (Render): `https://satelite-image-classification-3.onrender.com`
-- Live Backend API (Render): `https://satelite-image-classification.onrender.com`
-- Hugging Face Model Endpoint: `https://missnoel-satellite-classifier-api.hf.space/predict`
+- [Live Frontend](https://satelite-image-classification-3.onrender.com) (Render): 
+- [Live Backend API](https://satelite-image-classification.onrender.com) (Render): 
+- Hugging Face [Model Endpoint](https://missnoel-satellite-classifier-api.hf.space/predict): 
 
 ## Project Description
 
@@ -141,7 +141,7 @@ pip install -r requirements.txt
 Create a `.env` in the project root:
 
 ```env
-DATABASE_URL=postgresql://postgres:postgres@localhost:5434/satellite_db
+DATABASE_URL=postgresq....
 
 USE_HF_INFERENCE=true
 HF_MODEL_URL=https://missnoel-satellite-classifier-api.hf.space/predict
@@ -158,7 +158,7 @@ RETRAIN_WORKER_STALE_SECONDS=45
 DB_CONNECT_RETRIES=60
 DB_CONNECT_DELAY_SECONDS=2
 
-# Optional for persistent disk deployments (Render/Railway)
+# Optional for persistent disk deployments
 UPLOAD_DATA_DIR=data/uploads
 RETRAIN_DATA_DIR=data/retrain
 ```
