@@ -152,6 +152,7 @@ HF_MAX_RETRIES=2
 HF_RETRY_BACKOFF_SECONDS=1.0
 HF_RETRY_BACKOFF_MULTIPLIER=2.0
 ENABLE_LOCAL_INFERENCE=false
+ENABLE_WEB_RETRAIN=false
 
 DB_CONNECT_RETRIES=60
 DB_CONNECT_DELAY_SECONDS=2
@@ -292,4 +293,6 @@ RETRAIN_DATA_DIR=/var/data/retrain
 ```
 
 - Hugging Face inference is enabled when `USE_HF_INFERENCE=true`.
+- Web-service retraining is disabled by default (`ENABLE_WEB_RETRAIN=false`) to avoid 502 outages on low-resource instances.
+- For production retraining, use a separate worker/job service and keep web retraining disabled.
 

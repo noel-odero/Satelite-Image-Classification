@@ -66,6 +66,7 @@ export default function RetrainPanel() {
         → Retraining uses images uploaded via the Upload tab as new training data.<br />
         → The existing model is used as a pretrained base and fine-tuned for 5 epochs.<br />
         → Retraining runs in the background — the API stays responsive.<br />
+        → In production, retraining may be disabled on web instances to avoid service outages.<br />
         → Poll status updates every 3 seconds automatically.
       </div>
 

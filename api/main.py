@@ -58,6 +58,7 @@ HF_MAX_RETRIES = int(os.environ.get("HF_MAX_RETRIES", "2"))
 HF_RETRY_BACKOFF_SECONDS = float(os.environ.get("HF_RETRY_BACKOFF_SECONDS", "1.0"))
 HF_RETRY_BACKOFF_MULTIPLIER = float(os.environ.get("HF_RETRY_BACKOFF_MULTIPLIER", "2.0"))
 ENABLE_LOCAL_INFERENCE = os.environ.get("ENABLE_LOCAL_INFERENCE", "false").lower() == "true"
+ENABLE_WEB_RETRAIN = os.environ.get("ENABLE_WEB_RETRAIN", "false").lower() == "true"
 USE_HF_INFERENCE = os.environ.get("USE_HF_INFERENCE", "false").lower() == "true" or bool(HF_MODEL_URL)
 
 # Global state 
@@ -346,6 +347,7 @@ async def health():
         "inference_provider": "huggingface" if USE_HF_INFERENCE else "local",
         "timestamp": datetime.utcnow().isoformat(),
         "retrain_running": retrain_status["running"],
+        "retrain_enabled": ENABLE_WEB_RETRAIN,
         "db_ready": db_ready,
     }
 
@@ -470,6 +472,16 @@ async def trigger_retrain(background_tasks: BackgroundTasks):
     """
     if retrain_status["running"]:
         raise HTTPException(status_code=409, detail="Retraining already in progress.")
+
+    if not ENABLE_WEB_RETRAIN:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Retraining is disabled on this web service to avoid instability on small instances. "
+                "Run retraining in a separate worker/job service, or set ENABLE_WEB_RETRAIN=true "
+                "only if your instance has enough CPU/RAM."
+            ),
+        )
 
     await _ensure_db_pool_available()
 

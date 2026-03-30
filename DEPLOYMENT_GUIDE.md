@@ -53,11 +53,14 @@ HF_TIMEOUT_SECONDS=60
 HF_MAX_RETRIES=2
 HF_RETRY_BACKOFF_SECONDS=1.0
 HF_RETRY_BACKOFF_MULTIPLIER=2.0
+ENABLE_WEB_RETRAIN=false
 DB_CONNECT_RETRIES=60
 DB_CONNECT_DELAY_SECONDS=2
 ```
 
 This confirms production inference is routed through Hugging Face (not local model loading).
+
+Retraining on the web service is intentionally disabled by default to prevent CPU/RAM spikes causing 502 downtime on free-tier instances. If needed, run retraining in a separate worker/job service.
 
 ## Fallback Behavior
 
