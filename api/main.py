@@ -62,7 +62,76 @@ USE_HF_INFERENCE = os.environ.get("USE_HF_INFERENCE", "false").lower() == "true"
 # Global state 
 classifier: Optional["SatelliteClassifier"] = None
 db_pool: Optional[asyncpg.Pool] = None
+db_init_lock = asyncio.Lock()
 retrain_status = {"running": False, "last_result": None}
+
+
+async def _init_db_pool_and_schema() -> None:
+    """Initialize DB connection pool and required tables."""
+    global db_pool
+
+    if db_pool is not None:
+        return
+
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL is not set.")
+
+    async with db_init_lock:
+        if db_pool is not None:
+            return
+
+        db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+        async with db_pool.acquire() as conn:
+            await conn.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto;")
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS uploaded_images (
+                    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    filename    TEXT NOT NULL,
+                    class_label TEXT NOT NULL,
+                    file_path   TEXT NOT NULL,
+                    file_bytes  BYTEA,
+                    uploaded_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+            await conn.execute(
+                "ALTER TABLE uploaded_images ADD COLUMN IF NOT EXISTS file_bytes BYTEA;"
+            )
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS predictions (
+                    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    filename         TEXT,
+                    predicted_class  TEXT NOT NULL,
+                    confidence       FLOAT NOT NULL,
+                    all_probs        JSONB,
+                    predicted_at     TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS retrain_logs (
+                    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    triggered_at TIMESTAMPTZ DEFAULT NOW(),
+                    result       JSONB
+                );
+            """)
+        print("Database tables ready.")
+
+
+async def _ensure_db_pool_available(retries: int = 2, delay_seconds: float = 1.0) -> None:
+    """Ensure DB pool is ready for request handlers, with short retries."""
+    if db_pool is not None:
+        return
+
+    last_error = None
+    for attempt in range(1, retries + 2):
+        try:
+            await _init_db_pool_and_schema()
+            return
+        except Exception as exc:
+            last_error = exc
+            if attempt <= retries:
+                await asyncio.sleep(delay_seconds)
+
+    raise HTTPException(status_code=503, detail=f"Database unavailable: {last_error}")
 
 
 async def _restore_retrain_files_from_db() -> int:
@@ -223,60 +292,15 @@ async def lifespan(app: FastAPI):
 
         classifier = SatelliteClassifier(str(MODEL_PATH), str(CLASS_NAMES))
 
-    # Connect to PostgreSQL with retries for containerized startup races.
+    # Initialize DB on startup, but don't block service health forever if DB is slow.
     if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL is not set.")
-
-    last_error = None
-    for attempt in range(1, DB_CONNECT_RETRIES + 1):
+        print("DATABASE_URL is not set; DB-backed endpoints will return 503.")
+    else:
         try:
-            db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
-            break
+            await asyncio.wait_for(_init_db_pool_and_schema(), timeout=4.0)
         except Exception as exc:
-            last_error = exc
-            print(
-                f"DB connection attempt {attempt}/{DB_CONNECT_RETRIES} failed: {exc}"
-            )
-            if attempt == DB_CONNECT_RETRIES:
-                raise
-            await asyncio.sleep(DB_CONNECT_DELAY_SECONDS)
+            print(f"Startup DB init skipped: {exc}")
 
-    if db_pool is None:
-        raise RuntimeError(f"Failed to create database pool: {last_error}")
-
-    async with db_pool.acquire() as conn:
-        await conn.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto;")
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS uploaded_images (
-                id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                filename    TEXT NOT NULL,
-                class_label TEXT NOT NULL,
-                file_path   TEXT NOT NULL,
-                file_bytes  BYTEA,
-                uploaded_at TIMESTAMPTZ DEFAULT NOW()
-            );
-        """)
-        await conn.execute(
-            "ALTER TABLE uploaded_images ADD COLUMN IF NOT EXISTS file_bytes BYTEA;"
-        )
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS predictions (
-                id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                filename         TEXT,
-                predicted_class  TEXT NOT NULL,
-                confidence       FLOAT NOT NULL,
-                all_probs        JSONB,
-                predicted_at     TIMESTAMPTZ DEFAULT NOW()
-            );
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS retrain_logs (
-                id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                triggered_at TIMESTAMPTZ DEFAULT NOW(),
-                result       JSONB
-            );
-        """)
-    print("Database tables ready.")
     yield
 
     if db_pool is not None:
@@ -307,12 +331,14 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 @app.get("/health")
 async def health():
     """Uptime check — UI uses this to show model status."""
+    db_ready = db_pool is not None
     return {
         "status": "online",
         "model": "satellite_classifier",
         "inference_provider": "huggingface" if USE_HF_INFERENCE else "local",
         "timestamp": datetime.utcnow().isoformat(),
         "retrain_running": retrain_status["running"],
+        "db_ready": db_ready,
     }
 
 
@@ -322,6 +348,8 @@ async def predict(file: UploadFile = File(...)):
     Accept a single satellite image and return terrain classification.
     Also logs the prediction to the database.
     """
+    await _ensure_db_pool_available()
+
     file_bytes = await file.read()
 
     if not validate_image(file_bytes, file.filename):
@@ -359,6 +387,8 @@ async def upload_images(
     if class_label.strip() == "":
         raise HTTPException(status_code=400, detail="class_label is required.")
 
+    await _ensure_db_pool_available()
+
     class_dir = RETRAIN_DIR / class_label
     class_dir.mkdir(parents=True, exist_ok=True)
 
@@ -395,6 +425,8 @@ async def _run_retrain():
     global retrain_status, classifier
     retrain_status["running"] = True
     try:
+        await _ensure_db_pool_available()
+
         from src.model import retrain
 
         result = retrain(
@@ -428,6 +460,8 @@ async def trigger_retrain(background_tasks: BackgroundTasks):
     """
     if retrain_status["running"]:
         raise HTTPException(status_code=409, detail="Retraining already in progress.")
+
+    await _ensure_db_pool_available()
 
     image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tif", ".tiff"}
     disk_image_count = sum(
@@ -479,6 +513,8 @@ async def get_retrain_status():
 @app.get("/stats")
 async def get_stats():
     """Returns dataset and prediction statistics for UI visualizations."""
+    await _ensure_db_pool_available()
+
     async with db_pool.acquire() as conn:
         upload_counts = await conn.fetch(
             "SELECT class_label, COUNT(*) as count FROM uploaded_images GROUP BY class_label"
