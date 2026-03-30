@@ -75,6 +75,8 @@ export default function RetrainPanel() {
   }
 
   const result = status.last_result
+  const fmtPct = (value) => (typeof value === 'number' ? `${(value * 100).toFixed(2)}%` : 'N/A')
+  const fmtVal = (value) => (typeof value === 'number' ? value : 'N/A')
 
   return (
     <div style={s.wrap}>
@@ -121,10 +123,10 @@ export default function RetrainPanel() {
             {[
               ['Timestamp',        result.timestamp],
               ['Epochs Run',       result.epochs_run],
-              ['Train Accuracy',   `${(result.final_train_accuracy * 100).toFixed(2)}%`],
-              ['Val Accuracy',     `${(result.final_val_accuracy * 100).toFixed(2)}%`],
-              ['Train Loss',       result.final_train_loss],
-              ['Val Loss',         result.final_val_loss],
+              ['Train Accuracy',   fmtPct(result.final_train_accuracy)],
+              ['Val Accuracy',     fmtPct(result.final_val_accuracy)],
+              ['Train Loss',       fmtVal(result.final_train_loss)],
+              ['Val Loss',         fmtVal(result.final_val_loss)],
             ].map(([k, v]) => (
               <div key={k} style={s.metric}>
                 <span>{k}</span><span style={s.metricVal}>{v}</span>

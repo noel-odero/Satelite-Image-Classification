@@ -76,22 +76,51 @@ def retrain(
         shuffle=False,
     )
 
+    has_validation = val_gen.samples > 0
+    if not has_validation:
+        print("[Retrain] Validation split has 0 samples; training without validation.")
+        gen = ImageDataGenerator(
+            preprocessing_function=preprocess_input,
+            horizontal_flip=True,
+            rotation_range=15,
+            zoom_range=0.1,
+        )
+        train_gen = gen.flow_from_directory(
+            new_data_dir,
+            target_size=IMG_SIZE,
+            batch_size=batch_size,
+            class_mode="categorical",
+            shuffle=True,
+        )
+        val_gen = None
+
+    if train_gen.samples == 0:
+        raise ValueError("No training samples found. Upload more retraining images.")
+
     callbacks = [
         keras.callbacks.EarlyStopping(
-            monitor="val_loss", patience=2, restore_best_weights=True
+            monitor="val_loss" if has_validation else "loss",
+            patience=2,
+            restore_best_weights=True,
         ),
         keras.callbacks.ReduceLROnPlateau(
-            monitor="val_loss", factor=0.3, patience=1, verbose=1
+            monitor="val_loss" if has_validation else "loss",
+            factor=0.3,
+            patience=1,
+            verbose=1,
         ),
     ]
 
-    history = model.fit(
-        train_gen,
-        epochs=epochs,
-        validation_data=val_gen,
-        callbacks=callbacks,
-        verbose=1,
-    )
+    fit_kwargs = {
+        "x": train_gen,
+        "epochs": epochs,
+        "callbacks": callbacks,
+        "verbose": 1,
+    }
+    if has_validation and val_gen is not None:
+        fit_kwargs["validation_data"] = val_gen
+
+    history = model.fit(**fit_kwargs)
 
     # Save updated model back to same path
     model.save(model_path)
@@ -106,9 +135,14 @@ def retrain(
     return {
         "status": "success",
         "timestamp": datetime.utcnow().isoformat(),
+        "used_validation_split": has_validation,
         "epochs_run": len(history.history["accuracy"]),
         "final_train_accuracy": round(history.history["accuracy"][-1], 4),
-        "final_val_accuracy": round(history.history["val_accuracy"][-1], 4),
+        "final_val_accuracy": round(history.history["val_accuracy"][-1], 4)
+        if has_validation and "val_accuracy" in history.history
+        else None,
         "final_train_loss": round(history.history["loss"][-1], 4),
-        "final_val_loss": round(history.history["val_loss"][-1], 4),
+        "final_val_loss": round(history.history["val_loss"][-1], 4)
+        if has_validation and "val_loss" in history.history
+        else None,
     }
