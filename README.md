@@ -245,17 +245,22 @@ Fill with your measured values from the Locust run report.
 
 | Concurrent Users | Requests/sec | Median Response Time (ms) | 95th Percentile (ms) | Failure Rate |
 |---|---:|---:|---:|---:|
-| 10 | `TBD` | `TBD` | `TBD` | `TBD` |
-| 50 | `TBD` | `TBD` | `TBD` | `TBD` |
-| 100 | `TBD` | `TBD` | `TBD` | `TBD` |
+| 10 | 18 | 340 | 26000 | 0 |
+| 50 | 90 | 1500 | 20000 | 0 |
+| 100 | 898 | 7100 | 56000 | 1 |
 
 ### Locust Screenshots
 
 Add screenshots and update paths below:
+ ### 10 users
+ <img width="1920" height="1020" alt="image" src="https://github.com/user-attachments/assets/5612554d-2ce4-494c-bcb2-9b13c8ea07ce" /> 
+ 
+  ### 50 users
+ <img width="1920" height="1020" alt="image" src="https://github.com/user-attachments/assets/606119f3-6d08-47b5-8585-d95605b69fed" /> 
 
-- `docs/load-tests/locust-10-users.png` (add file)
-- `docs/load-tests/locust-50-users.png` (add file)
-- `docs/load-tests/locust-100-users.png` (add file)
+  ### 100 users
+ <img width="1920" height="1020" alt="image" src="https://github.com/user-attachments/assets/d50482ac-5742-453b-8bd1-fff5757c4f19" /> 
+
 
 ## Model Evaluation Results (Notebook)
 
