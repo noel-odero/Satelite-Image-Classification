@@ -54,6 +54,7 @@ HF_MAX_RETRIES=2
 HF_RETRY_BACKOFF_SECONDS=1.0
 HF_RETRY_BACKOFF_MULTIPLIER=2.0
 ENABLE_WEB_RETRAIN=false
+ENABLE_RETRAIN_QUEUE=true
 DB_CONNECT_RETRIES=60
 DB_CONNECT_DELAY_SECONDS=2
 ```
@@ -61,6 +62,28 @@ DB_CONNECT_DELAY_SECONDS=2
 This confirms production inference is routed through Hugging Face (not local model loading).
 
 Retraining on the web service is intentionally disabled by default to prevent CPU/RAM spikes causing 502 downtime on free-tier instances. If needed, run retraining in a separate worker/job service.
+
+### Render Background Worker
+
+Create a second Render service of type **Background Worker** using the same repo:
+
+- Start command: `python worker/retrain_worker.py`
+- Environment variables:
+	- `DATABASE_URL` (same database as web API)
+	- `MODEL_PATH` (optional)
+	- `CLASS_NAMES_PATH` (optional)
+	- `RETRAIN_WORKER_POLL_INTERVAL_SECONDS` (optional, default `3`)
+	- `RETRAIN_WORKER_HEARTBEAT_INTERVAL_SECONDS` (optional, default `10`)
+
+For web API observability in queue mode:
+
+- Set `RETRAIN_WORKER_STALE_SECONDS=45` (or your preferred threshold)
+- Check `GET /retrain/worker-status`
+- `GET /health` includes worker liveness fields (`retrain_worker_alive`, `retrain_worker_last_seen`, `retrain_worker_status`)
+
+Request flow becomes:
+
+Frontend -> Web API `/retrain` (enqueue) -> Worker processes queue -> Frontend polls `/retrain/status`.
 
 ## Fallback Behavior
 

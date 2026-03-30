@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { triggerRetrain, fetchRetrainStatus } from '../api.js'
+import { triggerRetrain, fetchRetrainStatus, fetchHealth } from '../api.js'
 
 const s = {
   section: { fontFamily: 'var(--sans)', fontSize: '0.8rem', color: 'var(--muted)', fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: '1rem', borderBottom: '1px solid var(--border)', paddingBottom: '0.5rem' },
@@ -28,6 +28,7 @@ export default function RetrainPanel() {
   const [status, setStatus]   = useState({ running: false, last_result: null })
   const [loading, setLoading] = useState(false)
   const [error, setError]     = useState(null)
+  const [retrainEnabled, setRetrainEnabled] = useState(false)
   const pollRef = useRef(null)
 
   const poll = async () => {
@@ -43,7 +44,24 @@ export default function RetrainPanel() {
 
   useEffect(() => { poll(); return () => { if (pollRef.current) clearInterval(pollRef.current) } }, [])
 
+  useEffect(() => {
+    const loadHealth = async () => {
+      try {
+        const health = await fetchHealth()
+        setRetrainEnabled(health?.retrain_enabled === true)
+      } catch {
+        setRetrainEnabled(false)
+      }
+    }
+    loadHealth()
+  }, [])
+
   const handleRetrain = async () => {
+    if (!retrainEnabled) {
+      setError('Retraining is disabled on this deployment. Contact admin or use worker/job retraining.')
+      return
+    }
+
     setLoading(true); setError(null)
     try {
       await triggerRetrain()
@@ -71,11 +89,15 @@ export default function RetrainPanel() {
       </div>
 
       <button
-        style={s.btn(loading || status.running)}
-        disabled={loading || status.running}
+        style={s.btn(loading || status.running || !retrainEnabled)}
+        disabled={loading || status.running || !retrainEnabled}
         onClick={handleRetrain}
       >
-        {status.running ? '⟳ RETRAINING IN PROGRESS...' : 'TRIGGER RETRAINING'}
+        {!retrainEnabled
+          ? 'RETRAINING DISABLED ON THIS DEPLOYMENT'
+          : status.running
+            ? '⟳ RETRAINING IN PROGRESS...'
+            : 'TRIGGER RETRAINING'}
       </button>
 
       {error && <p style={s.error}>ERROR: {error}</p>}
@@ -83,7 +105,15 @@ export default function RetrainPanel() {
       <div style={s.status(status.running)}>
         <div style={s.statusLabel}>Current Status</div>
         <div style={s.statusValue(status.running)}>
-          {status.running ? 'RUNNING' : result?.status === 'error' ? 'FAILED' : result ? 'COMPLETED' : 'IDLE'}
+          {status.state === 'queued'
+            ? 'QUEUED'
+            : status.running
+              ? 'RUNNING'
+              : result?.status === 'error'
+                ? 'FAILED'
+                : result
+                  ? 'COMPLETED'
+                  : 'IDLE'}
         </div>
 
         {result && result.status === 'success' && (

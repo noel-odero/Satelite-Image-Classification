@@ -59,6 +59,8 @@ HF_RETRY_BACKOFF_SECONDS = float(os.environ.get("HF_RETRY_BACKOFF_SECONDS", "1.0
 HF_RETRY_BACKOFF_MULTIPLIER = float(os.environ.get("HF_RETRY_BACKOFF_MULTIPLIER", "2.0"))
 ENABLE_LOCAL_INFERENCE = os.environ.get("ENABLE_LOCAL_INFERENCE", "false").lower() == "true"
 ENABLE_WEB_RETRAIN = os.environ.get("ENABLE_WEB_RETRAIN", "false").lower() == "true"
+ENABLE_RETRAIN_QUEUE = os.environ.get("ENABLE_RETRAIN_QUEUE", "true").lower() == "true"
+RETRAIN_WORKER_STALE_SECONDS = int(os.environ.get("RETRAIN_WORKER_STALE_SECONDS", "45"))
 USE_HF_INFERENCE = os.environ.get("USE_HF_INFERENCE", "false").lower() == "true" or bool(HF_MODEL_URL)
 
 # Global state 
@@ -115,6 +117,30 @@ async def _init_db_pool_and_schema() -> None:
                     result       JSONB
                 );
             """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS retrain_jobs (
+                    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    status        TEXT NOT NULL,
+                    queued_at     TIMESTAMPTZ DEFAULT NOW(),
+                    started_at    TIMESTAMPTZ,
+                    completed_at  TIMESTAMPTZ,
+                    requested_by  TEXT,
+                    result        JSONB,
+                    error_message TEXT,
+                    worker_id     TEXT,
+                    CONSTRAINT retrain_jobs_status_check CHECK (
+                        status IN ('queued', 'running', 'success', 'failed')
+                    )
+                );
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS retrain_worker_heartbeats (
+                    worker_id      TEXT PRIMARY KEY,
+                    last_heartbeat TIMESTAMPTZ NOT NULL,
+                    status         TEXT,
+                    updated_at     TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
         print("Database tables ready.")
 
 
@@ -167,6 +193,48 @@ async def _restore_retrain_files_from_db() -> int:
         restored += 1
 
     return restored
+
+
+async def _get_latest_retrain_job(conn) -> Optional[dict]:
+    row = await conn.fetchrow(
+        """
+        SELECT id, status, queued_at, started_at, completed_at, result, error_message
+        FROM retrain_jobs
+        ORDER BY queued_at DESC
+        LIMIT 1
+        """
+    )
+    if row is None:
+        return None
+
+    result = dict(row)
+    for key in ("queued_at", "started_at", "completed_at"):
+        if result[key] is not None:
+            result[key] = result[key].isoformat()
+    return result
+
+
+async def _get_retrain_worker_status(conn) -> dict:
+    row = await conn.fetchrow(
+        """
+        SELECT worker_id, last_heartbeat, status
+        FROM retrain_worker_heartbeats
+        ORDER BY last_heartbeat DESC
+        LIMIT 1
+        """
+    )
+    if row is None:
+        return {"alive": False, "worker_id": None, "last_heartbeat": None, "status": None}
+
+    now = datetime.utcnow().timestamp()
+    last_seen_ts = row["last_heartbeat"].timestamp()
+    alive = (now - last_seen_ts) <= RETRAIN_WORKER_STALE_SECONDS
+    return {
+        "alive": alive,
+        "worker_id": row["worker_id"],
+        "last_heartbeat": row["last_heartbeat"].isoformat(),
+        "status": row["status"],
+    }
 
 
 def _normalize_label(label: str) -> str:
@@ -341,13 +409,33 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 async def health():
     """Uptime check — UI uses this to show model status."""
     db_ready = db_pool is not None
+    retrain_mode = "queue" if ENABLE_RETRAIN_QUEUE else ("web" if ENABLE_WEB_RETRAIN else "disabled")
+    retrain_running = retrain_status["running"]
+    worker_status = {"alive": False, "worker_id": None, "last_heartbeat": None, "status": None}
+
+    if db_ready and ENABLE_RETRAIN_QUEUE:
+        try:
+            async with db_pool.acquire() as conn:
+                queued_or_running = await conn.fetchval(
+                    "SELECT COUNT(*) FROM retrain_jobs WHERE status IN ('queued', 'running')"
+                )
+                worker_status = await _get_retrain_worker_status(conn)
+            retrain_running = bool(queued_or_running)
+        except Exception:
+            pass
+
     return {
         "status": "online",
         "model": "satellite_classifier",
         "inference_provider": "huggingface" if USE_HF_INFERENCE else "local",
         "timestamp": datetime.utcnow().isoformat(),
-        "retrain_running": retrain_status["running"],
-        "retrain_enabled": ENABLE_WEB_RETRAIN,
+        "retrain_running": retrain_running,
+        "retrain_enabled": retrain_mode != "disabled",
+        "retrain_mode": retrain_mode,
+        "retrain_worker_alive": worker_status["alive"],
+        "retrain_worker_last_seen": worker_status["last_heartbeat"],
+        "retrain_worker_id": worker_status["worker_id"],
+        "retrain_worker_status": worker_status["status"],
         "db_ready": db_ready,
     }
 
@@ -470,20 +558,46 @@ async def trigger_retrain(background_tasks: BackgroundTasks):
     Trigger model retraining on all uploaded images.
     Runs as a background task so the API stays responsive.
     """
-    if retrain_status["running"]:
-        raise HTTPException(status_code=409, detail="Retraining already in progress.")
-
-    if not ENABLE_WEB_RETRAIN:
+    if not ENABLE_RETRAIN_QUEUE and not ENABLE_WEB_RETRAIN:
         raise HTTPException(
             status_code=503,
             detail=(
-                "Retraining is disabled on this web service to avoid instability on small instances. "
-                "Run retraining in a separate worker/job service, or set ENABLE_WEB_RETRAIN=true "
-                "only if your instance has enough CPU/RAM."
+                "Retraining is disabled on this deployment. "
+                "Enable queue mode (ENABLE_RETRAIN_QUEUE=true) with a separate worker, "
+                "or set ENABLE_WEB_RETRAIN=true only on high-resource instances."
             ),
         )
 
     await _ensure_db_pool_available()
+
+    if ENABLE_RETRAIN_QUEUE:
+        async with db_pool.acquire() as conn:
+            active_job_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM retrain_jobs WHERE status IN ('queued', 'running')"
+            )
+            if active_job_count:
+                raise HTTPException(status_code=409, detail="A retraining job is already queued or running.")
+
+            db_uploaded_count = await conn.fetchval("SELECT COUNT(*) FROM uploaded_images")
+            if db_uploaded_count == 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No uploaded data found for retraining. Upload images first.",
+                )
+
+            job_id = await conn.fetchval(
+                "INSERT INTO retrain_jobs (status, requested_by) VALUES ('queued', $1) RETURNING id",
+                "api",
+            )
+
+        return {
+            "message": "Retraining job queued. Worker will process it asynchronously.",
+            "status": "queued",
+            "job_id": str(job_id),
+        }
+
+    if retrain_status["running"]:
+        raise HTTPException(status_code=409, detail="Retraining already in progress.")
 
     image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tif", ".tiff"}
     disk_image_count = sum(
@@ -529,7 +643,65 @@ async def trigger_retrain(background_tasks: BackgroundTasks):
 @app.get("/retrain/status")
 async def get_retrain_status():
     """Poll this endpoint to check if retraining is still running."""
-    return retrain_status
+    if not ENABLE_RETRAIN_QUEUE:
+        return retrain_status
+
+    await _ensure_db_pool_available()
+
+    async with db_pool.acquire() as conn:
+        latest_job = await _get_latest_retrain_job(conn)
+
+    if latest_job is None:
+        return {
+            "running": False,
+            "state": "idle",
+            "job_id": None,
+            "last_result": None,
+            "error": None,
+        }
+
+    state = latest_job["status"]
+    result_payload = latest_job.get("result")
+    if result_payload is None and state == "failed":
+        result_payload = {
+            "status": "error",
+            "message": latest_job.get("error_message") or "Retraining job failed.",
+        }
+
+    return {
+        "running": state in {"queued", "running"},
+        "state": state,
+        "job_id": str(latest_job["id"]),
+        "queued_at": latest_job.get("queued_at"),
+        "started_at": latest_job.get("started_at"),
+        "completed_at": latest_job.get("completed_at"),
+        "last_result": result_payload,
+        "error": latest_job.get("error_message"),
+    }
+
+
+@app.get("/retrain/worker-status")
+async def get_retrain_worker_status():
+    """Returns heartbeat/liveness status for retrain worker in queue mode."""
+    if not ENABLE_RETRAIN_QUEUE:
+        return {
+            "enabled": False,
+            "alive": False,
+            "worker_id": None,
+            "last_heartbeat": None,
+            "status": None,
+            "detail": "Queue mode is disabled.",
+        }
+
+    await _ensure_db_pool_available()
+    async with db_pool.acquire() as conn:
+        worker_status = await _get_retrain_worker_status(conn)
+
+    return {
+        "enabled": True,
+        **worker_status,
+        "stale_after_seconds": RETRAIN_WORKER_STALE_SECONDS,
+    }
 
 
 @app.get("/stats")

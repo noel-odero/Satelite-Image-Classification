@@ -153,6 +153,8 @@ HF_RETRY_BACKOFF_SECONDS=1.0
 HF_RETRY_BACKOFF_MULTIPLIER=2.0
 ENABLE_LOCAL_INFERENCE=false
 ENABLE_WEB_RETRAIN=false
+ENABLE_RETRAIN_QUEUE=true
+RETRAIN_WORKER_STALE_SECONDS=45
 
 DB_CONNECT_RETRIES=60
 DB_CONNECT_DELAY_SECONDS=2
@@ -294,5 +296,28 @@ RETRAIN_DATA_DIR=/var/data/retrain
 
 - Hugging Face inference is enabled when `USE_HF_INFERENCE=true`.
 - Web-service retraining is disabled by default (`ENABLE_WEB_RETRAIN=false`) to avoid 502 outages on low-resource instances.
-- For production retraining, use a separate worker/job service and keep web retraining disabled.
+- Queue-based retraining is enabled by default (`ENABLE_RETRAIN_QUEUE=true`) and should be processed by a separate worker.
+- For production retraining, run `python worker/retrain_worker.py` in a separate worker/job service and keep web retraining disabled.
+
+### Render Worker (Recommended)
+
+Create a Render Background Worker service from the same repository.
+
+- Start command: `python worker/retrain_worker.py`
+- Required env vars:
+	- `DATABASE_URL`
+	- `MODEL_PATH` (optional override)
+	- `CLASS_NAMES_PATH` (optional override)
+	- `RETRAIN_WORKER_POLL_INTERVAL_SECONDS` (optional, default `3`)
+	- `RETRAIN_WORKER_HEARTBEAT_INTERVAL_SECONDS` (optional, default `10`)
+
+Monitoring endpoints:
+
+- `GET /health` now includes `retrain_worker_alive`, `retrain_worker_last_seen`, and `retrain_worker_status` in queue mode.
+- `GET /retrain/worker-status` returns detailed worker heartbeat status.
+
+Web service should keep:
+
+- `ENABLE_WEB_RETRAIN=false`
+- `ENABLE_RETRAIN_QUEUE=true`
 
