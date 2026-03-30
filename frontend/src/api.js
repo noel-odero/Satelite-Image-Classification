@@ -2,6 +2,24 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api'
 const HF_MODEL_URL = (import.meta.env.VITE_HF_MODEL_URL || '').trim()
 const HF_TOKEN = (import.meta.env.VITE_HF_TOKEN || '').trim()
 
+function getBackendRoot() {
+  if (!/^https?:\/\//i.test(API_BASE)) return ''
+  return API_BASE
+    .replace(/\/+$/, '')
+    .replace(/\/api$/, '')
+}
+
+export function resolveVisualizationUrl(url) {
+  if (!url) return url
+  if (/^https?:\/\//i.test(url)) return url
+
+  const root = getBackendRoot()
+  if (!root) return url
+
+  if (url.startsWith('/')) return `${root}${url}`
+  return `${root}/${url}`
+}
+
 function normalizeLabel(label) {
   return String(label || '')
     .trim()

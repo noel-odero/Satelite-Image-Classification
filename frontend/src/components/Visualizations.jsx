@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { fetchVisualizations } from '../api.js'
+import { fetchVisualizations, resolveVisualizationUrl } from '../api.js'
 
 const s = {
   grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: '1.5rem' },
@@ -39,7 +39,7 @@ export default function Visualizations() {
           <div style={s.grid}>
             {urls.map(url => (
               <div key={url} style={s.card}>
-                <img src={url} alt={url} style={s.img} />
+                <img src={resolveVisualizationUrl(url)} alt={url} style={s.img} />
                 <div style={s.caption}>{getCaption(url)}</div>
               </div>
             ))}
