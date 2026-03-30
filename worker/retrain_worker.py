@@ -2,14 +2,18 @@ import asyncio
 import json
 import os
 import socket
+import sys
 import tempfile
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 import asyncpg
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 MODEL_PATH = Path(os.environ.get("MODEL_PATH", str(BASE_DIR / "models" / "satellite_classifier.h5")))
 CLASS_NAMES_PATH = Path(os.environ.get("CLASS_NAMES_PATH", str(BASE_DIR / "models" / "class_names.json")))
@@ -182,7 +186,7 @@ def run_training(data_dir: Path) -> dict:
 
 
 async def process_job(pool: asyncpg.Pool, job_id: str) -> None:
-    print(f"[{datetime.utcnow().isoformat()}] Processing retrain job {job_id}")
+    print(f"[{datetime.now(timezone.utc).isoformat()}] Processing retrain job {job_id}")
     await update_heartbeat(pool, f"running:{job_id}")
     rows = await load_uploaded_images(pool)
 
@@ -197,11 +201,11 @@ async def process_job(pool: asyncpg.Pool, job_id: str) -> None:
             result = await asyncio.to_thread(run_training, tmp_path)
             await mark_job_success(pool, job_id, result)
             await update_heartbeat(pool, "idle")
-            print(f"[{datetime.utcnow().isoformat()}] Retrain job {job_id} completed")
+            print(f"[{datetime.now(timezone.utc).isoformat()}] Retrain job {job_id} completed")
         except Exception as exc:
             await mark_job_failed(pool, job_id, f"{type(exc).__name__}: {exc}")
             await update_heartbeat(pool, f"error:{job_id}")
-            print(f"[{datetime.utcnow().isoformat()}] Retrain job {job_id} failed: {exc}")
+            print(f"[{datetime.now(timezone.utc).isoformat()}] Retrain job {job_id} failed: {exc}")
 
 
 async def main() -> None:
