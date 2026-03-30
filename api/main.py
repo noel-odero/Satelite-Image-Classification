@@ -57,6 +57,7 @@ HF_TIMEOUT_SECONDS = float(os.environ.get("HF_TIMEOUT_SECONDS", "60"))
 HF_MAX_RETRIES = int(os.environ.get("HF_MAX_RETRIES", "2"))
 HF_RETRY_BACKOFF_SECONDS = float(os.environ.get("HF_RETRY_BACKOFF_SECONDS", "1.0"))
 HF_RETRY_BACKOFF_MULTIPLIER = float(os.environ.get("HF_RETRY_BACKOFF_MULTIPLIER", "2.0"))
+ENABLE_LOCAL_INFERENCE = os.environ.get("ENABLE_LOCAL_INFERENCE", "false").lower() == "true"
 USE_HF_INFERENCE = os.environ.get("USE_HF_INFERENCE", "false").lower() == "true" or bool(HF_MODEL_URL)
 
 # Global state 
@@ -283,11 +284,18 @@ async def _predict_with_hf(file_bytes: bytes) -> dict:
 async def lifespan(app: FastAPI):
     global classifier, db_pool
 
+    if not USE_HF_INFERENCE and not ENABLE_LOCAL_INFERENCE:
+        raise RuntimeError(
+            "Local inference is disabled. Set USE_HF_INFERENCE=true and HF_MODEL_URL to use Hugging Face, "
+            "or explicitly set ENABLE_LOCAL_INFERENCE=true."
+        )
+
     # Load local model only when local inference is enabled.
     if USE_HF_INFERENCE:
         print(f"Using Hugging Face inference endpoint: {HF_MODEL_URL}")
         classifier = None
     else:
+        print("Using local model inference.")
         from src.prediction import SatelliteClassifier
 
         classifier = SatelliteClassifier(str(MODEL_PATH), str(CLASS_NAMES))
@@ -439,6 +447,8 @@ async def _run_retrain():
 
         # Reload classifier with updated model only for local inference mode.
         if not USE_HF_INFERENCE:
+            from src.prediction import SatelliteClassifier
+
             classifier = SatelliteClassifier(str(MODEL_PATH), str(CLASS_NAMES))
 
         async with db_pool.acquire() as conn:

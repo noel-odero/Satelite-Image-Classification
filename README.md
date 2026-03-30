@@ -151,6 +151,7 @@ HF_TIMEOUT_SECONDS=60
 HF_MAX_RETRIES=2
 HF_RETRY_BACKOFF_SECONDS=1.0
 HF_RETRY_BACKOFF_MULTIPLIER=2.0
+ENABLE_LOCAL_INFERENCE=false
 
 DB_CONNECT_RETRIES=60
 DB_CONNECT_DELAY_SECONDS=2
@@ -158,6 +159,13 @@ DB_CONNECT_DELAY_SECONDS=2
 # Optional for persistent disk deployments (Render/Railway)
 UPLOAD_DATA_DIR=data/uploads
 RETRAIN_DATA_DIR=data/retrain
+```
+
+Frontend Render env (backend-only API flow):
+
+```env
+VITE_API_BASE_URL=https://satelite-image-classification.onrender.com
+# Leave VITE_HF_MODEL_URL and VITE_HF_TOKEN unset
 ```
 
 ### 5. Start Database
