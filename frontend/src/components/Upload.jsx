@@ -1,5 +1,5 @@
-import { useState, useRef } from 'react'
-import { uploadImages } from '../api.js'
+import { useState, useRef, useEffect } from 'react'
+import { uploadImages, fetchStats } from '../api.js'
 
 const CLASSES = ['cloudy', 'desert', 'green_area', 'water']
 
@@ -34,13 +34,37 @@ const s = {
 }
 
 export default function Upload() {
-  const [classLabel, setClassLabel] = useState(CLASSES[0])
+  const [classLabel, setClassLabel] = useState(() => {
+    const persisted = localStorage.getItem('retrain.classLabel')
+    return CLASSES.includes(persisted) ? persisted : CLASSES[0]
+  })
   const [files, setFiles]           = useState([])
   const [drag, setDrag]             = useState(false)
   const [loading, setLoading]       = useState(false)
   const [result, setResult]         = useState(null)
   const [error, setError]           = useState(null)
+  const [uploadCounts, setUploadCounts] = useState({})
   const inputRef = useRef()
+
+  const loadUploadCounts = async () => {
+    try {
+      const stats = await fetchStats()
+      const counts = Object.fromEntries(
+        (stats.upload_counts || []).map((row) => [row.class_label, Number(row.count) || 0])
+      )
+      setUploadCounts(counts)
+    } catch {
+      setUploadCounts({})
+    }
+  }
+
+  useEffect(() => {
+    localStorage.setItem('retrain.classLabel', classLabel)
+  }, [classLabel])
+
+  useEffect(() => {
+    loadUploadCounts()
+  }, [])
 
   const addFiles = (newFiles) => {
     setFiles(prev => [...prev, ...Array.from(newFiles)])
@@ -58,6 +82,7 @@ export default function Upload() {
     try {
       const res = await uploadImages(files, classLabel)
       setResult(res); setFiles([])
+      loadUploadCounts()
     } catch (e) {
       setError(e.message)
     } finally {
@@ -73,6 +98,14 @@ export default function Upload() {
       <div style={s.row}>
         {CLASSES.map(c => (
           <button key={c} style={s.classBtn(classLabel === c)} onClick={() => setClassLabel(c)}>{c}</button>
+        ))}
+      </div>
+
+      <div style={{ ...s.fileList, marginTop: '-0.3rem' }}>
+        {CLASSES.map((c) => (
+          <div key={c} style={s.fileItem}>
+            {c.toUpperCase()} STORED ON SERVER: {uploadCounts[c] ?? 0}
+          </div>
         ))}
       </div>
 
@@ -98,6 +131,10 @@ export default function Upload() {
           {files.map((f, i) => <div key={i} style={s.fileItem}>↳ {f.name}</div>)}
         </div>
       )}
+
+      <p style={{ fontFamily: 'var(--mono)', fontSize: '0.66rem', color: 'var(--muted)', marginBottom: '1rem' }}>
+        Note: selected local files clear on browser refresh, but uploaded files remain persisted on the server/database.
+      </p>
 
       <button style={s.btn(!files.length || loading)} disabled={!files.length || loading} onClick={handleUpload}>
         {loading ? 'UPLOADING...' : `UPLOAD ${files.length || ''} IMAGES TO ${classLabel.toUpperCase()}`}

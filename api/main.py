@@ -61,6 +61,39 @@ db_pool: Optional[asyncpg.Pool] = None
 retrain_status = {"running": False, "last_result": None}
 
 
+async def _restore_retrain_files_from_db() -> int:
+    """Rehydrate retraining image files from DB when container disk is empty."""
+    if db_pool is None:
+        return 0
+
+    restored = 0
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, filename, class_label, file_bytes
+            FROM uploaded_images
+            WHERE file_bytes IS NOT NULL
+            """
+        )
+
+    for row in rows:
+        class_dir = RETRAIN_DIR / row["class_label"]
+        class_dir.mkdir(parents=True, exist_ok=True)
+
+        safe_filename = Path(row["filename"]).name
+        unique_name = f"{str(row['id']).replace('-', '')}_{safe_filename}"
+        file_path = class_dir / unique_name
+
+        if file_path.exists():
+            continue
+
+        file_bytes = bytes(row["file_bytes"])
+        file_path.write_bytes(file_bytes)
+        restored += 1
+
+    return restored
+
+
 def _normalize_label(label: str) -> str:
     return str(label).strip().lower().replace(" ", "_")
 
@@ -174,9 +207,13 @@ async def lifespan(app: FastAPI):
                 filename    TEXT NOT NULL,
                 class_label TEXT NOT NULL,
                 file_path   TEXT NOT NULL,
+                file_bytes  BYTEA,
                 uploaded_at TIMESTAMPTZ DEFAULT NOW()
             );
         """)
+        await conn.execute(
+            "ALTER TABLE uploaded_images ADD COLUMN IF NOT EXISTS file_bytes BYTEA;"
+        )
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS predictions (
                 id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -292,11 +329,12 @@ async def upload_images(
             save_path.write_bytes(file_bytes)
 
             await conn.execute(
-                """INSERT INTO uploaded_images (filename, class_label, file_path)
-                   VALUES ($1, $2, $3)""",
+                     """INSERT INTO uploaded_images (filename, class_label, file_path, file_bytes)
+                         VALUES ($1, $2, $3, $4)""",
                 file.filename,
                 class_label,
                 str(save_path),
+                     file_bytes,
             )
             saved.append(unique_name)
 
@@ -355,12 +393,23 @@ async def trigger_retrain(background_tasks: BackgroundTasks):
     async with db_pool.acquire() as conn:
         db_uploaded_count = await conn.fetchval("SELECT COUNT(*) FROM uploaded_images")
 
+    # For ephemeral container filesystems, rebuild retrain files from DB blobs.
+    if disk_image_count == 0 and db_uploaded_count > 0:
+        restored_count = await _restore_retrain_files_from_db()
+        if restored_count > 0:
+            disk_image_count = sum(
+                1
+                for p in RETRAIN_DIR.rglob("*")
+                if p.is_file() and p.suffix.lower() in image_exts
+            )
+
     if disk_image_count == 0:
         raise HTTPException(
             status_code=400,
             detail=(
                 "No retraining image files found on server disk. "
                 f"Database has {db_uploaded_count} uploaded image record(s). "
+                "Some older rows may not include binary image data. "
                 "If this service restarted/redeployed on Render, local disk data may have been cleared. "
                 "Upload images again and retrain immediately, or mount a persistent disk and set RETRAIN_DATA_DIR."
             ),
