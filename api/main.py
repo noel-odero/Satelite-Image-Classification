@@ -1,5 +1,4 @@
 """
-main.py
 FastAPI application — exposes all endpoints needed by the UI:
   POST /predict         — single image prediction
   POST /upload          — bulk image upload (saved to DB + disk for retraining)
@@ -34,11 +33,13 @@ from src.model import retrain
 
 # Paths 
 BASE_DIR      = Path(__file__).parent.parent
+load_dotenv(BASE_DIR / ".env")
+
 MODEL_PATH    = BASE_DIR / "models" / "satellite_classifier.h5"
 RETRAIN_MODEL = BASE_DIR / "models" / "best_model.keras"
 CLASS_NAMES   = BASE_DIR / "models" / "class_names.json"
-UPLOAD_DIR    = BASE_DIR / "data" / "uploads"
-RETRAIN_DIR   = BASE_DIR / "data" / "retrain"
+UPLOAD_DIR    = Path(os.environ.get("UPLOAD_DATA_DIR", str(BASE_DIR / "data" / "uploads")))
+RETRAIN_DIR   = Path(os.environ.get("RETRAIN_DATA_DIR", str(BASE_DIR / "data" / "retrain")))
 STATIC_DIR    = BASE_DIR / "static"
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -46,9 +47,6 @@ RETRAIN_DIR.mkdir(parents=True, exist_ok=True)
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
 # DB 
-# Load .env for local development runs (uvicorn on host). In containers/platforms,
-# runtime environment variables still take precedence.
-load_dotenv(BASE_DIR / ".env")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 DB_CONNECT_RETRIES = int(os.environ.get("DB_CONNECT_RETRIES", "30"))
 DB_CONNECT_DELAY_SECONDS = float(os.environ.get("DB_CONNECT_DELAY_SECONDS", "2"))
@@ -345,6 +343,28 @@ async def trigger_retrain(background_tasks: BackgroundTasks):
     """
     if retrain_status["running"]:
         raise HTTPException(status_code=409, detail="Retraining already in progress.")
+
+    image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tif", ".tiff"}
+    disk_image_count = sum(
+        1
+        for p in RETRAIN_DIR.rglob("*")
+        if p.is_file() and p.suffix.lower() in image_exts
+    )
+
+    db_uploaded_count = 0
+    async with db_pool.acquire() as conn:
+        db_uploaded_count = await conn.fetchval("SELECT COUNT(*) FROM uploaded_images")
+
+    if disk_image_count == 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No retraining image files found on server disk. "
+                f"Database has {db_uploaded_count} uploaded image record(s). "
+                "If this service restarted/redeployed on Render, local disk data may have been cleared. "
+                "Upload images again and retrain immediately, or mount a persistent disk and set RETRAIN_DATA_DIR."
+            ),
+        )
 
     class_dirs = [d for d in RETRAIN_DIR.iterdir() if d.is_dir()]
     if not class_dirs:
