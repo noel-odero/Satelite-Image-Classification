@@ -35,9 +35,8 @@ It provides:
 - Image size noted in notebook intro: `256x256`
 - Total images noted in notebook intro: `5,631`
 
-Kaggle link (update with the exact public URL you used):
+[Kaggle link](https://www.kaggle.com/datasets/mahmoudreda55/satellite-image-classification) 
 
-- `https://www.kaggle.com/datasets/mahmoudreda55/satellite-image-classification`
 
 ### Model Architecture Summary
 
