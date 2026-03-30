@@ -1,193 +1,104 @@
-# Deployment Guide - Option B: Separate Frontend & Backend
+# Deployment Guide - What Was Actually Done
 
-This guide covers deploying the frontend and backend as separate Render services while keeping them properly connected.
+This document records the exact deployment path used for this project.
 
-## Architecture
+## Current Deployment Setup
 
-- **Backend Service**: `satelite-image-classification.onrender.com` (Python FastAPI)
-- **Frontend Service**: `satelite-image-classification-3.onrender.com` (React + Vite)
+- Backend service: satelite-image-classification.onrender.com (FastAPI)
+- Frontend service: satelite-image-classification-3.onrender.com (React + Vite)
+- Frontend and backend are deployed as separate Render services.
 
-## Setup Instructions
+## Hugging Face Model Deployment
 
-### 1. Backend Service (Existing)
+- The trained model is also deployed on Hugging Face.
+- Hugging Face endpoint in use: https://missnoel-satellite-classifier-api.hf.space/predict
+- Backend inference is configured to use Hugging Face by setting `USE_HF_INFERENCE=true`.
+- Requests flow is: Frontend -> Render backend API -> Hugging Face model endpoint.
 
-Your backend is already deployed. Ensure it has:
+## Problem That Was Seen
 
-**Environment Variables**:
-- `DATABASE_URL` (PostgreSQL)
-- `USE_HF_INFERENCE=true` (if using Hugging Face)
-- `HF_MODEL_URL` (Hugging Face endpoint)
-- `HF_TOKEN` (if required)
+- Retrain requests from the frontend failed.
+- Browser showed CORS-related errors and failed fetches.
+- Retrain endpoint also returned 400 when no retraining folders/data existed.
 
-**Verification**:
-```bash
-curl https://satelite-image-classification.onrender.com/health
-```
+## Root Cause
 
-### 2. Frontend Service (New Configuration)
+- Frontend build was using the default API base `/api` from `frontend/src/api.js`.
+- With separate domains, `/api` does not point to the backend service.
 
-Create a new "Web Service" on Render pointing to the same repository.
+## What Was Changed
 
-**Build Command**:
-```bash
-npm install && npm run build
-```
+Only Render environment configuration was changed (no backend code change required for this fix).
 
-**Start Command** (optional, only if serving statically):
-```bash
-npm run preview
-```
+### Frontend Render Environment
 
-**Environment Variables** (CRITICAL):
+Set this variable on the frontend service:
 
-When configuring the frontend service, set this environment variable during the build phase:
-
-```
+```env
 VITE_API_BASE_URL=https://satelite-image-classification.onrender.com
 ```
 
-This tells Vite to embed the backend URL into the built application at build time.
+Then redeploy the frontend service so Vite rebuilds with the value.
 
-**Important**: Without this, the frontend defaults to `/api` which only works when frontend and backend are on the same domain.
+### Backend Render Environment
 
-### 3. Initialization: Add Training Data
+Backend environment values in use:
 
-Before you can trigger retraining, the backend needs sample training data in:
-
-```
-data/retrain/{class_label}/image1.jpg
-data/retrain/{class_label}/image2.jpg
-```
-
-The subdirectories must exist for each class: `cloudy`, `desert`, `green_area`, `water`
-
-**Via API (Upload Tab)**:
-1. Go to the Upload tab in the UI
-2. Select images for each class (cloudy, desert, green_area, water)
-3. Upload them
-4. The directory structure will be created automatically
-
-**OR Via Git** (included sample images):
-```
-data/retrain/
-├── cloudy/
-│   └── sample_cloudy.png
-├── desert/
-│   └── sample_desert.png
-├── green_area/
-│   └── sample_green.png
-└── water/
-    └── sample_water.png
+```env
+DATABASE_URL=postgresql://...
+USE_HF_INFERENCE=true
+HF_MODEL_URL=https://missnoel-satellite-classifier-api.hf.space/predict
+HF_TOKEN=
+HF_TIMEOUT_SECONDS=60
+DB_CONNECT_RETRIES=60
+DB_CONNECT_DELAY_SECONDS=2
 ```
 
-Without data in these directories, the `/retrain` endpoint returns a 400 error.
+This confirms production inference is routed through Hugging Face (not local model loading).
 
-## CORS Configuration
+## Fallback Behavior
 
-Your FastAPI backend already has CORS properly configured:
+- Current setup has no automatic runtime failover from Hugging Face to local model.
+- If Hugging Face is unavailable or times out, prediction requests return an API error.
+- To switch to local inference, set `USE_HF_INFERENCE=false` and redeploy backend with local model files available.
 
-```python
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+## Retraining Data Source Used
+
+Training data was uploaded through the Upload tab in the frontend UI.
+
+Expected folder structure created by uploads:
+
+```text
+data/retrain/cloudy/
+data/retrain/desert/
+data/retrain/green_area/
+data/retrain/water/
 ```
 
-This allows requests from any origin. The frontend and backend can communicate freely.
+If these folders are empty/missing, `POST /retrain` returns 400.
 
-## Testing the Setup
+## Quick Verification
 
-### 1. Verify Backend
+1. Confirm frontend calls backend domain (not `/api`) in browser Network tab.
+2. Check backend health:
+
 ```bash
 curl https://satelite-image-classification.onrender.com/health
 ```
 
-Should return:
-```json
-{
-  "status": "online",
-  "model": "satellite_classifier",
-  "inference_provider": "huggingface",
-  "timestamp": "2026-03-30T12:34:56.789012",
-  "retrain_running": false
-}
-```
+3. Trigger retrain:
 
-### 2. Test Predict Endpoint
-```bash
-curl -X POST https://satelite-image-classification.onrender.com/predict \
-  -F "file=@sample_image.jpg"
-```
-
-### 3. Test Retrain (after uploading training data)
 ```bash
 curl -X POST https://satelite-image-classification.onrender.com/retrain
 ```
 
-### 4. Check Retrain Status
+4. Poll retrain status:
+
 ```bash
 curl https://satelite-image-classification.onrender.com/retrain/status
 ```
 
-## Troubleshooting
+## Notes
 
-### Issue: "No uploaded data found for retraining" (400 error)
-
-**Cause**: No subdirectories with training images in `data/retrain/`
-
-**Fix**:
-1. Use the Upload tab to upload training images for each class
-2. Or commit sample images to git in `data/retrain/{class}/`
-
-### Issue: CORS error on fetch requests
-
-**Cause**: Usually means the API_BASE_URL is still `/api`
-
-**Check**:
-1. In browser DevTools, check the actual request URL
-2. It should be `https://satelite-image-classification.onrender.com/retrain`
-3. NOT `/api/retrain`
-
-**Fix**: Ensure `VITE_API_BASE_URL` is set as an environment variable in Render frontend service
-
-### Issue: Visualization images return 404
-
-**Cause**: Static files haven't been generated
-
-**Fix**: These are generated during model training. After successful retraining, they'll appear in:
-```
-static/visualizations/
-├── class_distribution.png
-├── mean_intensity.png
-└── sample_images.png
-```
-
-## Local Development
-
-For local testing with separate frontend/backend:
-
-**Terminal 1 (Backend)**:
-```bash
-cd api
-uvicorn main:app --reload --port 8000
-```
-
-**Terminal 2 (Frontend)**:
-```bash
-cd frontend
-VITE_API_BASE_URL=http://localhost:8000 npm run dev
-```
-
-## Environment Variables Summary
-
-| Variable | Service | Example | Purpose |
-|----------|---------|---------|---------|
-| `DATABASE_URL` | Backend | `postgresql://...` | PostgreSQL connection |
-| `USE_HF_INFERENCE` | Backend | `true` | Use Hugging Face instead of local model |
-| `HF_MODEL_URL` | Backend | `https://hf.space/...` | Hugging Face inference endpoint |
-| `HF_TOKEN` | Backend | `hf_xxxxx` | Hugging Face API token (if required) |
-| `VITE_API_BASE_URL` | Frontend | `https://satelite-image-classification.onrender.com` | Backend URL for API calls |
-
-**Note**: The `VITE_` prefix variables are embedded at **build time** in Vite. They must be set before running `npm run build`.
+- `VITE_` environment variables are baked in at build time.
+- Changing `VITE_API_BASE_URL` requires a frontend redeploy.
