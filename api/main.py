@@ -17,7 +17,7 @@ import asyncio
 from pathlib import Path
 from datetime import datetime
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import asyncpg
 import requests
@@ -27,9 +27,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from src.prediction import SatelliteClassifier
 from src.preprocessing import validate_image
-from src.model import retrain
+
+if TYPE_CHECKING:
+    from src.prediction import SatelliteClassifier
 
 # Paths 
 BASE_DIR      = Path(__file__).parent.parent
@@ -53,10 +54,13 @@ DB_CONNECT_DELAY_SECONDS = float(os.environ.get("DB_CONNECT_DELAY_SECONDS", "2")
 HF_MODEL_URL = os.environ.get("HF_MODEL_URL", "").strip()
 HF_TOKEN = os.environ.get("HF_TOKEN", "").strip()
 HF_TIMEOUT_SECONDS = float(os.environ.get("HF_TIMEOUT_SECONDS", "60"))
+HF_MAX_RETRIES = int(os.environ.get("HF_MAX_RETRIES", "2"))
+HF_RETRY_BACKOFF_SECONDS = float(os.environ.get("HF_RETRY_BACKOFF_SECONDS", "1.0"))
+HF_RETRY_BACKOFF_MULTIPLIER = float(os.environ.get("HF_RETRY_BACKOFF_MULTIPLIER", "2.0"))
 USE_HF_INFERENCE = os.environ.get("USE_HF_INFERENCE", "false").lower() == "true" or bool(HF_MODEL_URL)
 
 # Global state 
-classifier: Optional[SatelliteClassifier] = None
+classifier: Optional["SatelliteClassifier"] = None
 db_pool: Optional[asyncpg.Pool] = None
 retrain_status = {"running": False, "last_result": None}
 
@@ -149,21 +153,60 @@ async def _predict_with_hf(file_bytes: bytes) -> dict:
             timeout=HF_TIMEOUT_SECONDS,
         )
 
-    response = await asyncio.to_thread(_post_request)
+    last_error: Optional[str] = None
+    backoff_seconds = HF_RETRY_BACKOFF_SECONDS
+    retryable_statuses = {429, 502, 503, 504}
 
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = {"raw": response.text}
+    for attempt in range(1, HF_MAX_RETRIES + 2):
+        request_started = datetime.utcnow()
+        try:
+            response = await asyncio.to_thread(_post_request)
+        except requests.RequestException as exc:
+            last_error = f"Hugging Face request failed: {exc}"
+            should_retry = attempt <= HF_MAX_RETRIES
+            print(
+                f"HF request exception on attempt {attempt}/{HF_MAX_RETRIES + 1}: {exc}"
+            )
+            if should_retry:
+                await asyncio.sleep(backoff_seconds)
+                backoff_seconds *= HF_RETRY_BACKOFF_MULTIPLIER
+                continue
+            raise HTTPException(status_code=503, detail=last_error)
 
-    if response.status_code >= 400:
+        duration_seconds = (datetime.utcnow() - request_started).total_seconds()
+
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {"raw": response.text}
+
+        if response.status_code < 400:
+            try:
+                return _normalize_hf_output(payload)
+            except ValueError as exc:
+                raise HTTPException(status_code=502, detail=str(exc))
+
         detail = payload.get("error") if isinstance(payload, dict) else str(payload)
-        raise HTTPException(status_code=502, detail=f"Hugging Face error: {detail}")
+        last_error = f"Hugging Face error (HTTP {response.status_code}): {detail}"
+        should_retry = attempt <= HF_MAX_RETRIES and response.status_code in retryable_statuses
+        print(
+            "HF upstream error "
+            f"attempt={attempt}/{HF_MAX_RETRIES + 1} "
+            f"status={response.status_code} duration={duration_seconds:.2f}s "
+            f"retry={should_retry}"
+        )
 
-    try:
-        return _normalize_hf_output(payload)
-    except ValueError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        if should_retry:
+            await asyncio.sleep(backoff_seconds)
+            backoff_seconds *= HF_RETRY_BACKOFF_MULTIPLIER
+            continue
+
+        raise HTTPException(status_code=503, detail=last_error)
+
+    raise HTTPException(
+        status_code=503,
+        detail=last_error or "Hugging Face inference failed after retries.",
+    )
 
 
 # Startup / Shutdown 
@@ -176,6 +219,8 @@ async def lifespan(app: FastAPI):
         print(f"Using Hugging Face inference endpoint: {HF_MODEL_URL}")
         classifier = None
     else:
+        from src.prediction import SatelliteClassifier
+
         classifier = SatelliteClassifier(str(MODEL_PATH), str(CLASS_NAMES))
 
     # Connect to PostgreSQL with retries for containerized startup races.
@@ -350,6 +395,8 @@ async def _run_retrain():
     global retrain_status, classifier
     retrain_status["running"] = True
     try:
+        from src.model import retrain
+
         result = retrain(
             new_data_dir=str(RETRAIN_DIR),
             model_path=str(MODEL_PATH),
