@@ -4,7 +4,7 @@ End-to-end machine learning system for classifying satellite images into 4 terra
 
 ## Essential Links
 
-- YouTube Demo: `ADD_YOUTUBE_DEMO_LINK_HERE`
+- [YouTube Demo](https://www.youtube.com/watch?v=KajEfkIf808)
 - [Live Frontend](https://satelite-image-classification-3.onrender.com) (Render): 
 - [Live Backend API](https://satelite-image-classification.onrender.com) (Render): 
 - Hugging Face [Model Endpoint](https://missnoel-satellite-classifier-api.hf.space/predict): 
